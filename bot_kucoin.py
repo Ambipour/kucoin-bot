@@ -3,7 +3,7 @@ import logging
 from flask import Flask, request, jsonify
 import requests
 from kucoin.client import Client
-from kucoin.exceptions import KucoinAPIException, KucoinResponseException
+from kucoin.exceptions import KucoinAPIException, KucoinRequestException
 
 # Configurar logging a nivel INFO para mostrar mensajes informativos en consola
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s: %(message)s')
@@ -121,7 +121,7 @@ def webhook_eth():
         # Si la orden se colocó exitosamente, registrar respuesta
         logging.info(f'Orden de {action} enviada. Respuesta de KuCoin: {order}')
         telegram_msg = f'✅ {tipo_op} ejecutada con éxito. Respuesta KuCoin: {order}'
-    except (KucoinAPIException, KucoinResponseException) as e:
+    except (KucoinAPIException, KucoinRequestException) as e:
         # Error devuelto por la API de KuCoin
         logging.error(f'Error de KuCoin en la {tipo_op}: {e}')
         telegram_msg = f'❌ Error al realizar la {tipo_op}: {e}'
