@@ -1,0 +1,2 @@
+# kucoin-bot
+Bot kucoin
