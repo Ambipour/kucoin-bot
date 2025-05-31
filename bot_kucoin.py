@@ -4,117 +4,92 @@ from flask import Flask, request, jsonify
 import requests
 from kucoin.client import Client
 from kucoin.exceptions import KucoinAPIException, KucoinRequestException
+from decimal import Decimal, ROUND_DOWN
 
-# Configurar logging a nivel INFO
+# Configurar logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s: %(message)s')
 
-# Leer credenciales de entorno
-KUCOIN_API_KEY = os.environ.get('KUCOIN_API_KEY')
-KUCOIN_API_SECRET = os.environ.get('KUCOIN_API_SECRET')
-KUCOIN_API_PASSPHRASE = os.environ.get('KUCOIN_API_PASSPHRASE')
-TELEGRAM_TOKEN = os.environ.get('TELEGRAM_TOKEN')
-TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID')
+# Leer variables de entorno
+KUCOIN_API_KEY = os.getenv('KUCOIN_API_KEY')
+KUCOIN_API_SECRET = os.getenv('KUCOIN_API_SECRET')
+KUCOIN_API_PASSPHRASE = os.getenv('KUCOIN_API_PASSPHRASE')
+TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN')
+TELEGRAM_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID')
 
-# Verificar variables necesarias
-required_vars = {
+# Verificar que todas existan
+for var_name, var in {
     'KUCOIN_API_KEY': KUCOIN_API_KEY,
     'KUCOIN_API_SECRET': KUCOIN_API_SECRET,
     'KUCOIN_API_PASSPHRASE': KUCOIN_API_PASSPHRASE,
     'TELEGRAM_TOKEN': TELEGRAM_TOKEN,
     'TELEGRAM_CHAT_ID': TELEGRAM_CHAT_ID
-}
-missing = [name for name, val in required_vars.items() if not val]
-if missing:
-    for name in missing:
-        logging.error(f'Falta la variable de entorno {name}')
-    raise SystemExit('Error: Variables de entorno requeridas no definidas. Abortando.')
+}.items():
+    if not var:
+        raise Exception(f'❌ Falta la variable de entorno: {var_name}')
 
-# Inicializar KuCoin
+# Inicializar cliente KuCoin
 try:
     kucoin_client = Client(KUCOIN_API_KEY, KUCOIN_API_SECRET, KUCOIN_API_PASSPHRASE)
-    logging.info('Cliente de KuCoin inicializado correctamente.')
+    logging.info('✅ Cliente de KuCoin inicializado correctamente.')
 except Exception as e:
-    logging.error(f'Error al inicializar KuCoin: {e}')
+    logging.error(f'❌ Error al inicializar KuCoin: {e}')
     raise
 
-# Enviar a Telegram
-def send_telegram_message(text):
-    url = f'https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage'
-    params = {'chat_id': TELEGRAM_CHAT_ID, 'text': text}
+# Enviar mensaje a Telegram
+def enviar_mensaje_telegram(texto):
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+    payload = {"chat_id": TELEGRAM_CHAT_ID, "text": texto}
     try:
-        resp = requests.get(url, params=params)
-        if resp.status_code != 200 or not resp.json().get('ok'):
-            logging.error(f'Fallo Telegram: {resp.status_code} {resp.text}')
-        else:
-            logging.info(f'Mensaje Telegram enviado: {text}')
+        response = requests.post(url, data=payload)
+        if response.status_code != 200:
+            logging.error(f'❌ Telegram error {response.status_code}: {response.text}')
     except Exception as e:
-        logging.error(f'Error enviando Telegram: {e}')
+        logging.error(f'❌ Error enviando Telegram: {e}')
 
-# Crear app
+# Flask app
 app = Flask(__name__)
 
-# Aviso de inicio
-inicio_msg = '🤖 Bot de trading de KuCoin activo y esperando señales.'
-logging.info('Enviando mensaje de inicio a Telegram...')
-send_telegram_message(inicio_msg)
+# Al iniciar
+enviar_mensaje_telegram("🤖 Bot de trading de KuCoin activo y esperando señales.")
 
 @app.route('/webhook-eth', methods=['POST'])
 def webhook_eth():
     try:
         data = request.get_json(force=True)
-    except Exception as e:
-        logging.error(f'JSON invalido: {e}')
-        return jsonify({'error': 'Formato invalido'}), 400
+        logging.info(f'📨 Señal recibida: {data}')
+    except Exception:
+        return jsonify({'error': 'JSON inválido'}), 400
 
-    if not data:
-        return jsonify({'error': 'Solicitud sin datos'}), 400
-
-    action = data.get('action') or data.get('signal') or data.get('type')
-    if not action:
-        return jsonify({'error': 'Acción no especificada'}), 400
-
-    action = str(action).strip().upper()
-    if action not in ('BUY', 'SELL'):
+    action = str(data.get('action', '')).strip().upper()
+    if action not in ['BUY', 'SELL']:
         return jsonify({'error': 'Acción inválida'}), 400
-
-    logging.info(f'Señal recibida: {action}')
-    tipo_op = 'COMPRA' if action == 'BUY' else 'VENTA'
-    telegram_msg = ''
 
     try:
         if action == 'BUY':
-            accounts = kucoin_client.get_accounts('USDT', 'trade')
-            usdt_balance = float(accounts[0]['available']) if accounts and accounts[0].get('available') else 0.0
-            if usdt_balance <= 0:
+            saldo = float(next(acc['available'] for acc in kucoin_client.get_accounts()
+                               if acc['currency'] == 'USDT' and acc['type'] == 'trade'))
+            if saldo <= 0:
                 raise Exception('Saldo USDT insuficiente.')
-            amount = round(usdt_balance, 2)
-            order = kucoin_client.create_market_order('ETH-USDT', 'buy', funds=str(amount))
-
+            fondos = round(saldo, 2)
+            orden = kucoin_client.create_market_order('ETH-USDT', 'buy', funds=str(fondos))
         else:
-            accounts = kucoin_client.get_accounts('ETH', 'trade')
-            eth_balance = float(accounts[0]['available']) if accounts and accounts[0].get('available') else 0.0
-            if eth_balance <= 0:
+            saldo = float(next(acc['available'] for acc in kucoin_client.get_accounts()
+                               if acc['currency'] == 'ETH' and acc['type'] == 'trade'))
+            if saldo <= 0:
                 raise Exception('Saldo ETH insuficiente.')
-            from decimal import Decimal, ROUND_DOWN
+            tamaño = Decimal(str(saldo)).quantize(Decimal('0.0001'), rounding=ROUND_DOWN)
+            orden = kucoin_client.create_market_order('ETH-USDT', 'sell', size=str(tamaño))
 
-# Redondear a 4 decimales
-        eth_amount = Decimal(str(eth_balance)).quantize(Decimal('0.0001'), rounding=ROUND_DOWN)
-        order = kucoin_client.create_market_order('ETH-USDT', 'sell', size=str(eth_amount))
-
-
-        logging.info(f'Orden {action} ejecutada. Respuesta: {order}')
-        telegram_msg = f'✅ {tipo_op} ejecutada con éxito. Respuesta: {order}'
-    except (KucoinAPIException, KucoinRequestException) as e:
-        logging.error(f'Error KuCoin en {tipo_op}: {e}')
-        telegram_msg = f'❌ Error en {tipo_op}: {e}'
+        texto = f"✅ {action} ejecutada con éxito. Respuesta: {orden}"
+        logging.info(texto)
     except Exception as e:
-        logging.error(f'Fallo en {tipo_op}: {e}')
-        telegram_msg = f'❌ No se pudo completar la {tipo_op}: {e}'
+        texto = f"❌ Error en {action}: {e}"
+        logging.error(texto)
 
-    send_telegram_message(telegram_msg)
-    return jsonify({'signal': action, 'result': telegram_msg}), 200
+    enviar_mensaje_telegram(texto)
+    return jsonify({'signal': action, 'result': texto}), 200
 
-# Iniciar servidor
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000)
+
 
