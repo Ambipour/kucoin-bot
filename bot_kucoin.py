@@ -65,14 +65,11 @@ def webhook_eth():
         return jsonify({'error': 'Acción inválida'}), 400
 
     try:
-        if action == 'BUY':
-            saldo = float(next(acc['available'] for acc in kucoin_client.get_accounts()
-                               if acc['currency'] == 'USDT' and acc['type'] == 'trade'))
             if saldo <= 0:
                 raise Exception('Saldo USDT insuficiente.')
+            amount = round(usdt_balance, 2)
+            order = kucoin_client.create_market_order(...)  # Esto NUNCA se ejecutaba
 
-            amount = Decimal(str(saldo)).quantize(Decimal('0.01'), rounding=ROUND_DOWN)
-            orden = kucoin_client.create_market_order('ETH-USDT', 'buy', funds=str(amount))
 
         else:
             saldo = float(next(acc['available'] for acc in kucoin_client.get_accounts()
