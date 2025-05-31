@@ -131,11 +131,26 @@ def webhook_eth():
         telegram_msg = f'❌ No se pudo completar la {tipo_op}: {e}'
 
     # Enviar notificación a Telegram sobre el resultado de la señal
-    send_telegram_message(telegram_msg)
+    @app.route("/webhook-eth", methods=["POST"])
+def recibir_alerta_eth():
+    data = request.json
+    print(f"📨 Alerta recibida (ETH): {data}")
+    accion = data.get("action", "").upper()
+
+    if accion == "BUY":
+        enviar_mensaje_telegram("🟢 Señal de COMPRA detectada para ETH")
+    elif accion == "SELL":
+        enviar_mensaje_telegram("🔴 Señal de VENTA detectada para ETH")
+    else:
+        enviar_mensaje_telegram("⚠️ Acción desconocida recibida en ETH")
+
+    return jsonify({"status": "ok"})
+
     # Responder al webhook con un mensaje de confirmación (siempre 200 OK)
     return jsonify({'signal': action, 'result': telegram_msg}), 200
 
 # Iniciar la aplicación Flask en puerto 5000 (host 0.0.0.0) para producción
-if __name__ == '__main__':
-    port = int(os.environ.get('PORT', 5000))
-    app.run(host='0.0.0.0', port=port)
+if __name__ == "__main__":
+    enviar_mensaje_telegram("🤖 Bot de trading de KuCoin activo y esperando señales.")
+    app.run(host="0.0.0.0", port=5000)
+
