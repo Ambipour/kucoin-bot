@@ -87,7 +87,9 @@ def webhook_eth():
             usdt_balance = float(accounts[0]['available']) if accounts and accounts[0].get('available') else 0.0
             if usdt_balance <= 0:
                 raise Exception('Saldo USDT insuficiente.')
-            order = kucoin_client.create_market_order('ETH-USDT', 'buy', funds=str(usdt_balance))
+            amount = round(usdt_balance, 2)
+            order = kucoin_client.create_market_order('ETH-USDT', 'buy', funds=str(amount))
+
         else:
             accounts = kucoin_client.get_accounts('ETH', 'trade')
             eth_balance = float(accounts[0]['available']) if accounts and accounts[0].get('available') else 0.0
