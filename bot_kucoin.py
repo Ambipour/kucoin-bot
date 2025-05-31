@@ -1,120 +1,141 @@
 import os
-import time
-import hmac
-import hashlib
-import base64
-import json
-import requests
+import logging
 from flask import Flask, request, jsonify
+import requests
+from kucoin.client import Client
+from kucoin.exceptions import KucoinAPIException, KucoinResponseException
 
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
-TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
-KUCOIN_API_KEY = os.getenv("KUCOIN_API_KEY")
-KUCOIN_API_SECRET = os.getenv("KUCOIN_API_SECRET")
-KUCOIN_API_PASSPHRASE = os.getenv("KUCOIN_API_PASSPHRASE")
+# Configurar logging a nivel INFO para mostrar mensajes informativos en consola
+logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s: %(message)s')
 
-BASE_URL = "https://api.kucoin.com"
-SYMBOL = "ETH-USDT"
+# Leer credenciales de KuCoin y Telegram desde variables de entorno
+KUCOIN_API_KEY = os.environ.get('KUCOIN_API_KEY')
+KUCOIN_API_SECRET = os.environ.get('KUCOIN_API_SECRET')
+KUCOIN_API_PASSPHRASE = os.environ.get('KUCOIN_API_PASSPHRASE')
+TELEGRAM_TOKEN = os.environ.get('TELEGRAM_TOKEN')
+TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID')
 
+# Verificar que todas las variables de entorno requeridas estén definidas
+required_vars = {
+    'KUCOIN_API_KEY': KUCOIN_API_KEY,
+    'KUCOIN_API_SECRET': KUCOIN_API_SECRET,
+    'KUCOIN_API_PASSPHRASE': KUCOIN_API_PASSPHRASE,
+    'TELEGRAM_TOKEN': TELEGRAM_TOKEN,
+    'TELEGRAM_CHAT_ID': TELEGRAM_CHAT_ID
+}
+missing = [name for name, val in required_vars.items() if not val]
+if missing:
+    for name in missing:
+        logging.error(f'Falta la variable de entorno {name}')
+    raise SystemExit('Error: Variables de entorno requeridas no definidas. Abortando.')
+
+# Inicializar el cliente de la API de KuCoin
+try:
+    kucoin_client = Client(KUCOIN_API_KEY, KUCOIN_API_SECRET, KUCOIN_API_PASSPHRASE)
+    logging.info('Cliente de KuCoin inicializado correctamente.')
+except Exception as e:
+    logging.error(f'Error al inicializar el cliente de KuCoin: {e}')
+    raise
+
+# Función auxiliar para enviar mensajes de texto a Telegram
+def send_telegram_message(text: str):
+    """Envía un mensaje de texto al chat de Telegram configurado."""
+    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
+        logging.error('Credenciales de Telegram no configuradas; no se puede enviar el mensaje.')
+        return
+    url = f'https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage'
+    params = {'chat_id': TELEGRAM_CHAT_ID, 'text': text}
+    try:
+        resp = requests.get(url, params=params)
+        if resp.status_code != 200:
+            logging.error(f'Error al enviar mensaje a Telegram. Código HTTP {resp.status_code}: {resp.text}')
+        else:
+            data = resp.json()
+            if not data.get('ok'):
+                # La API de Telegram pudo responder 200 OK pero con ok=False (error en el envío)
+                logging.error(f'La API de Telegram devolvió un error: {data}')
+            else:
+                logging.info(f'Mensaje enviado a Telegram: {text}')
+    except Exception as e:
+        logging.error(f'Error de conexión al enviar mensaje a Telegram: {e}')
+
+# Crear la aplicación Flask
 app = Flask(__name__)
 
-def enviar_mensaje_telegram(texto):
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    payload = {"chat_id": TELEGRAM_CHAT_ID, "text": texto}
+# Enviar un mensaje a Telegram al arrancar, indicando que el bot está activo
+inicio_msg = '🤖 Bot de trading de KuCoin activo y esperando señales.'
+logging.info('Enviando mensaje de inicio a Telegram...')
+send_telegram_message(inicio_msg)
+
+@app.route('/webhook-eth', methods=['POST'])
+def webhook_eth():
+    """Maneja las señales de trading (BUY o SELL) recibidas via webhook."""
+    # Intentar obtener el JSON de la petición
     try:
-        requests.post(url, data=payload)
+        data = request.get_json(force=True)
     except Exception as e:
-        print(f"❌ Error enviando a Telegram: {e}")
+        logging.error(f'Error al leer JSON de la petición: {e}')
+        return jsonify({'error': 'Formato de datos inválido'}), 400
 
-def firmar(endpoint, method, body, timestamp):
-    str_to_sign = str(timestamp) + method + endpoint + body
-    return base64.b64encode(
-        hmac.new(KUCOIN_API_SECRET.encode(), str_to_sign.encode(), hashlib.sha256).digest()
-    ).decode()
+    if not data:
+        logging.error('Petición POST /webhook-eth recibida sin cuerpo JSON.')
+        return jsonify({'error': 'Solicitud sin datos'}), 400
 
-def obtener_saldo(asset):
-    endpoint = "/api/v1/accounts"
-    url = BASE_URL + endpoint
-    timestamp = str(int(time.time() * 1000))
-    headers = {
-        "KC-API-KEY": KUCOIN_API_KEY,
-        "KC-API-SIGN": firmar(endpoint, "GET", "", timestamp),
-        "KC-API-TIMESTAMP": timestamp,
-        "KC-API-PASSPHRASE": KUCOIN_API_PASSPHRASE,
-        "KC-API-KEY-VERSION": "2",
-        "Content-Type": "application/json"
-    }
-    response = requests.get(url, headers=headers)
-    if response.status_code == 200:
-        cuentas = response.json()["data"]
-        for cuenta in cuentas:
-            if cuenta["currency"] == asset and cuenta["type"] == "trade":
-                return float(cuenta["available"])
-    return 0.0
+    # Determinar la acción de la señal (esperada 'BUY' o 'SELL')
+    action = None
+    if isinstance(data, dict):
+        # Aceptar posibles claves de acción en el JSON
+        action = data.get('action') or data.get('signal') or data.get('type')
+    if not action:
+        logging.error('JSON de webhook no contiene campo de acción (BUY/SELL).')
+        return jsonify({'error': 'No se especificó la acción (BUY o SELL)'}), 400
 
-def crear_orden(accion, cantidad):
-    endpoint = "/api/v1/orders"
-    url = BASE_URL + endpoint
-    timestamp = str(int(time.time() * 1000))
-    
-    body = {
-        "clientOid": str(int(time.time() * 1000)),
-        "side": accion.lower(),
-        "symbol": SYMBOL,
-        "type": "market"
-    }
+    action = str(action).strip().upper()
+    if action not in ('BUY', 'SELL'):
+        logging.error(f'Acción inválida en la señal: {action}')
+        return jsonify({'error': 'Acción inválida, debe ser BUY o SELL'}), 400
 
-    if accion.upper() == "BUY":
-        body["funds"] = str(cantidad)
-    elif accion.upper() == "SELL":
-        body["size"] = str(cantidad)
+    logging.info(f'Señal recibida: {action}')
+    tipo_op = 'COMPRA' if action == 'BUY' else 'VENTA'
+    telegram_msg = ''
 
-    body_str = json.dumps(body)
-    headers = {
-        "KC-API-KEY": KUCOIN_API_KEY,
-        "KC-API-SIGN": firmar(endpoint, "POST", body_str, timestamp),
-        "KC-API-TIMESTAMP": timestamp,
-        "KC-API-PASSPHRASE": KUCOIN_API_PASSPHRASE,
-        "KC-API-KEY-VERSION": "2",
-        "Content-Type": "application/json"
-    }
-
-    response = requests.post(url, headers=headers, data=body_str)
-    print("📤 ORDEN ENVIADA:", response.status_code, response.text)
-    return response.json()
-
-@app.route("/webhook-eth", methods=["POST"])
-def recibir_alerta_eth():
-    data = request.json
-    print(f"📨 Alerta recibida (ETH): {data}")
-    accion = data.get("action", "").upper()
+    # Intentar realizar la operación en KuCoin
     try:
-        if accion == "BUY":
-            saldo = obtener_saldo("USDT")
-            if saldo <= 0:
-                enviar_mensaje_telegram("❌ Saldo insuficiente en USDT para comprar ETH.")
-                return jsonify({"error": "Saldo insuficiente"}), 400
-            crear_orden("BUY", saldo)
-            enviar_mensaje_telegram(f"🟢 COMPRA ejecutada de ETH por ~{saldo} USDT")
+        if action == 'BUY':
+            # Obtener 100% del saldo disponible de USDT para comprar ETH
+            accounts = kucoin_client.get_accounts('USDT', 'trade')
+            usdt_balance = float(accounts[0]['available']) if accounts and accounts[0].get('available') else 0.0
+            if usdt_balance <= 0:
+                raise Exception('Saldo USDT insuficiente para ejecutar la compra.')
+            # Ejecutar orden de mercado de compra (usar todo el USDT disponible)
+            order = kucoin_client.create_market_order('ETH-USDT', 'buy', funds=str(usdt_balance))
+        else:  # SELL
+            # Obtener 100% del saldo disponible de ETH para vender
+            accounts = kucoin_client.get_accounts('ETH', 'trade')
+            eth_balance = float(accounts[0]['available']) if accounts and accounts[0].get('available') else 0.0
+            if eth_balance <= 0:
+                raise Exception('Saldo ETH insuficiente para ejecutar la venta.')
+            # Ejecutar orden de mercado de venta (vender todo el ETH disponible)
+            order = kucoin_client.create_market_order('ETH-USDT', 'sell', size=str(eth_balance))
 
-        elif accion == "SELL":
-            saldo = obtener_saldo("ETH")
-            if saldo <= 0:
-                enviar_mensaje_telegram("❌ Saldo insuficiente en ETH para vender.")
-                return jsonify({"error": "Saldo insuficiente"}), 400
-            crear_orden("SELL", saldo)
-            enviar_mensaje_telegram(f"🔴 VENTA ejecutada de {saldo} ETH")
-
-        else:
-            enviar_mensaje_telegram("⚠️ Acción desconocida recibida en ETH")
-        return jsonify({"status": "ok"})
-
+        # Si la orden se colocó exitosamente, registrar respuesta
+        logging.info(f'Orden de {action} enviada. Respuesta de KuCoin: {order}')
+        telegram_msg = f'✅ {tipo_op} ejecutada con éxito. Respuesta KuCoin: {order}'
+    except (KucoinAPIException, KucoinResponseException) as e:
+        # Error devuelto por la API de KuCoin
+        logging.error(f'Error de KuCoin en la {tipo_op}: {e}')
+        telegram_msg = f'❌ Error al realizar la {tipo_op}: {e}'
     except Exception as e:
-        print(f"❌ ERROR: {e}")
-        enviar_mensaje_telegram(f"❌ Error ejecutando orden:\n{e}")
-        return jsonify({"error": str(e)}), 500
+        # Cualquier otro error (ej. saldo insuficiente u otro fallo)
+        logging.error(f'Error al procesar la operación de {tipo_op}: {e}')
+        telegram_msg = f'❌ No se pudo completar la {tipo_op}: {e}'
 
-if __name__ == "__main__":
-    enviar_mensaje_telegram("🤖 Bot ETH KuCoin activo y escuchando señales...")
-    app.run(host="0.0.0.0", port=5000)
+    # Enviar notificación a Telegram sobre el resultado de la señal
+    send_telegram_message(telegram_msg)
+    # Responder al webhook con un mensaje de confirmación (siempre 200 OK)
+    return jsonify({'signal': action, 'result': telegram_msg}), 200
 
+# Iniciar la aplicación Flask en puerto 5000 (host 0.0.0.0) para producción
+if __name__ == '__main__':
+    port = int(os.environ.get('PORT', 5000))
+    app.run(host='0.0.0.0', port=port)
