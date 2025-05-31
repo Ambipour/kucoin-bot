@@ -93,7 +93,12 @@ def webhook_eth():
             eth_balance = float(accounts[0]['available']) if accounts and accounts[0].get('available') else 0.0
             if eth_balance <= 0:
                 raise Exception('Saldo ETH insuficiente.')
-            order = kucoin_client.create_market_order('ETH-USDT', 'sell', size=str(eth_balance))
+            from decimal import Decimal, ROUND_DOWN
+
+# Redondear a 4 decimales
+        eth_amount = Decimal(str(eth_balance)).quantize(Decimal('0.0001'), rounding=ROUND_DOWN)
+        order = kucoin_client.create_market_order('ETH-USDT', 'sell', size=str(eth_amount))
+
 
         logging.info(f'Orden {action} ejecutada. Respuesta: {order}')
         telegram_msg = f'✅ {tipo_op} ejecutada con éxito. Respuesta: {order}'
